@@ -391,9 +391,22 @@ class _FieldDescriptor:
     def __get__(self, inst, cls=None):
         if inst is None: return self
         try:
-            return inst[self.name]
+            value = inst[self.name]
+            # If the value is a dict with encrypted fields, wrap it with EncryptedObject
+            if isinstance(value, dict) and not isinstance(value, EncryptedMixin.EncryptedObject):
+                if self._has_encrypted_fields(value):
+                    from .encryption import EncryptedObject
+                    # Get encryption functions from the document instance
+                    value = EncryptedObject(value, inst.encr, inst.decr)
+                    # Store the wrapped value back
+                    inst[self.name] = value
+            return value
         except KeyError:
             raise AttributeError(self.name)
+    
+    def _has_encrypted_fields(self, d: dict) -> bool:
+        """Check if a dict has any fields ending with _encrypted."""
+        return any(k.endswith('_encrypted') for k in d.keys())
 
     def __set__(self, inst, value):
         inst[self.name] = value
