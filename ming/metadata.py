@@ -393,9 +393,9 @@ class _FieldDescriptor:
         try:
             value = inst[self.name]
             # If the value is a dict with encrypted fields (direct or nested), wrap it with EncryptedObject
-            if isinstance(value, dict) and not isinstance(value, EncryptedMixin.EncryptedObject):
+            from .encryption import EncryptedObject
+            if isinstance(value, dict) and not isinstance(value, EncryptedObject):
                 if self._has_encrypted_fields_recursive(value):
-                    from .encryption import EncryptedObject
                     # Get encryption functions from the document instance
                     value = EncryptedObject(value, inst.encr, inst.decr)
                     # Store the wrapped value back

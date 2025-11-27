@@ -195,7 +195,7 @@ class EncryptedObject(dict):
     
     def _wrap_nested_dicts(self):
         """Wrap nested dicts with EncryptedObject if they contain encrypted fields."""
-        for key, value in list(self.items()):
+        for key, value in self.items():
             if isinstance(value, dict) and not isinstance(value, EncryptedObject):
                 # Check if this dict has any encrypted fields
                 if self._has_encrypted_fields(value):
@@ -424,12 +424,13 @@ class EncryptedMixin:
                 encrypted_data[f'{fld}_encrypted'] = cls.encr(val)
         
         # Handle nested dicts - recursively encrypt fields in dict values
-        for key, value in list(encrypted_data.items()):
-            if isinstance(value, dict) and key in cls.m.field_index:
-                field = cls.m.field_index[key]
-                if hasattr(field.schema, 'fields'):
-                    # This is an Object schema with defined fields
-                    encrypted_data[key] = cls._encrypt_nested_dict(value, field.schema.fields)
+        if hasattr(cls, 'm') and hasattr(cls.m, 'field_index') and cls.m.field_index:
+            for key, value in encrypted_data.items():
+                if isinstance(value, dict) and key in cls.m.field_index:
+                    field = cls.m.field_index[key]
+                    if hasattr(field, 'schema') and hasattr(field.schema, 'fields'):
+                        # This is an Object schema with defined fields
+                        encrypted_data[key] = cls._encrypt_nested_dict(value, field.schema.fields)
         
         return encrypted_data
     
@@ -455,7 +456,7 @@ class EncryptedMixin:
                 encrypted_data[encrypted_field] = cls.encr(val)
         
         # Recursively handle nested dicts
-        for key, value in list(encrypted_data.items()):
+        for key, value in encrypted_data.items():
             if isinstance(value, dict) and key in schema_fields:
                 nested_schema = schema_fields[key]
                 if hasattr(nested_schema, 'fields'):
