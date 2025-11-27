@@ -92,6 +92,90 @@ class EncryptedObject(dict):
     
     This class wraps a regular dict and provides transparent encryption/decryption
     when accessing fields that have _encrypted counterparts.
+    
+    This is automatically applied to dict fields that contain encrypted fields,
+    enabling nested field-level encryption in MongoDB documents.
+    
+    **Example Usage:**
+    
+    Define a document with nested encrypted fields:
+    
+    .. code-block:: python
+    
+        class User(Document):
+            class __mongometa__:
+                name = 'user'
+                session = my_session
+            
+            _id = Field(schema.ObjectId)
+            username = Field(str)
+            # Dict field with encrypted nested fields
+            full_name = Field(dict(
+                first_name_encrypted=schema.Binary,
+                last_name_encrypted=schema.Binary
+            ))
+    
+    Create a document with unencrypted nested data:
+    
+    .. code-block:: python
+    
+        user = User.make_encr({
+            '_id': ObjectId(),
+            'username': 'jdoe',
+            'full_name': {
+                'first_name': 'John',
+                'last_name': 'Doe'
+            }
+        })
+        user.m.save()
+    
+    Access decrypted values using dict notation:
+    
+    .. code-block:: python
+    
+        # Get decrypted values
+        print(user.full_name['first_name'])  # 'John'
+        print(user.full_name['last_name'])   # 'Doe'
+        
+        # Set new encrypted values
+        user.full_name['first_name'] = 'Johnny'
+        user.m.save()
+    
+    **How it Works:**
+    
+    1. When you define a dict field with fields ending in ``_encrypted`` (e.g., ``first_name_encrypted``),
+       the system recognizes these as encrypted fields.
+    
+    2. When creating a document with ``make_encr()``, any nested fields that have corresponding
+       ``_encrypted`` fields in the schema are automatically encrypted.
+    
+    3. When you access a field without the ``_encrypted`` suffix (e.g., ``'first_name'``),
+       EncryptedObject automatically decrypts the value from the ``first_name_encrypted`` field.
+    
+    4. When you set a field without the ``_encrypted`` suffix, EncryptedObject automatically
+       encrypts the value and stores it in the corresponding ``_encrypted`` field.
+    
+    **Multi-level Nesting:**
+    
+    This works recursively for any level of nesting:
+    
+    .. code-block:: python
+    
+        class Profile(Document):
+            personal_info = Field(dict(
+                address=dict(
+                    street_encrypted=schema.Binary,
+                    city_encrypted=schema.Binary
+                )
+            ))
+        
+        # Access deeply nested encrypted fields
+        profile.personal_info['address']['street'] = '123 Main St'
+    
+    :param data: The underlying dict data
+    :param encr_func: Function to encrypt data (str -> bytes)
+    :param decr_func: Function to decrypt data (bytes -> str)
+    :param field_schema: Dict mapping field names to their schemas (for nested dicts)
     """
     
     def __init__(self, data: dict, encr_func, decr_func, field_schema: dict = None):
