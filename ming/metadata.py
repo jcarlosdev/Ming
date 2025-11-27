@@ -392,9 +392,9 @@ class _FieldDescriptor:
         if inst is None: return self
         try:
             value = inst[self.name]
-            # If the value is a dict with encrypted fields, wrap it with EncryptedObject
+            # If the value is a dict with encrypted fields (direct or nested), wrap it with EncryptedObject
             if isinstance(value, dict) and not isinstance(value, EncryptedMixin.EncryptedObject):
-                if self._has_encrypted_fields(value):
+                if self._has_encrypted_fields_recursive(value):
                     from .encryption import EncryptedObject
                     # Get encryption functions from the document instance
                     value = EncryptedObject(value, inst.encr, inst.decr)
@@ -404,9 +404,15 @@ class _FieldDescriptor:
         except KeyError:
             raise AttributeError(self.name)
     
-    def _has_encrypted_fields(self, d: dict) -> bool:
-        """Check if a dict has any fields ending with _encrypted."""
-        return any(k.endswith('_encrypted') for k in d.keys())
+    def _has_encrypted_fields_recursive(self, d: dict) -> bool:
+        """Check if a dict has any fields ending with _encrypted, recursively."""
+        for k, v in d.items():
+            if k.endswith('_encrypted'):
+                return True
+            if isinstance(v, dict):
+                if self._has_encrypted_fields_recursive(v):
+                    return True
+        return False
 
     def __set__(self, inst, value):
         inst[self.name] = value
