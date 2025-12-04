@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, TypeVar, Generic, Callable
+from typing import TYPE_CHECKING, TypeVar, Generic
 
 from ming.utils import classproperty
 from ming.base import Object as BaseObject
@@ -85,7 +85,11 @@ class EncryptedObject(BaseObject):
         if name in decrypted_fields:
             decr_func = object.__getattribute__(self, '_decr_func')
             decrypted_field = decrypted_fields[name]
-            encrypted_value = dict.__getitem__(self, decrypted_field.encrypted_field) if decrypted_field.encrypted_field in self else None
+            encrypted_field_name = decrypted_field.encrypted_field
+            if encrypted_field_name in self:
+                encrypted_value = dict.__getitem__(self, encrypted_field_name)
+            else:
+                encrypted_value = None
             if decr_func is not None and encrypted_value is not None:
                 return decr_func(encrypted_value)
             return encrypted_value
