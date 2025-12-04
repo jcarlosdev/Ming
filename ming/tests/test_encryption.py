@@ -281,6 +281,60 @@ class TestDocumentEncryption(TestCase):
         self.assertEqual(doc.name, None)
         self.assertEqual(doc.name_encrypted, None)
 
+    def test_nested_decrypted_field(self):
+        """Test DecryptedField inside a nested dict field."""
+        class TestDocNested(Document):
+            class __mongometa__:
+                name='test_doc_nested'
+                session = ming.Session.by_name('test_db')
+            _id = Field(S.Anything)
+            profile = Field(dict(
+                first_name=DecryptedField(str, 'first_name_encrypted'),
+                first_name_encrypted=S.Binary,
+                last_name=DecryptedField(str, 'last_name_encrypted'),
+                last_name_encrypted=S.Binary,
+                age=int  # non-encrypted field
+            ))
+
+        # Create document with encrypted fields in nested dict
+        doc = TestDocNested.make(dict(
+            _id=1,
+            profile=dict(
+                first_name_encrypted=TestDocNested.encr('Jerome'),
+                last_name_encrypted=TestDocNested.encr('Smith'),
+                age=30
+            )
+        ))
+        doc.m.save()
+
+        # Test reading decrypted values
+        self.assertEqual(doc.profile.first_name, 'Jerome')
+        self.assertEqual(doc.profile.last_name, 'Smith')
+        self.assertEqual(doc.profile.age, 30)
+        
+        # Test that encrypted values are stored correctly
+        self.assertIsInstance(doc.profile.first_name_encrypted, bytes)
+        self.assertEqual(doc.profile.first_name_encrypted, TestDocNested.encr('Jerome'))
+        
+        # Test setting decrypted values
+        doc.profile.first_name = 'Jane'
+        doc.m.save()
+        self.assertEqual(doc.profile.first_name, 'Jane')
+        self.assertEqual(doc.profile.first_name_encrypted, TestDocNested.encr('Jane'))
+        
+        # Test using dict-style access
+        doc.profile['last_name'] = 'Doe'
+        doc.m.save()
+        self.assertEqual(doc.profile['last_name'], 'Doe')
+        self.assertEqual(doc.profile['last_name_encrypted'], TestDocNested.encr('Doe'))
+        
+        # Test setting None
+        doc.profile.first_name = None
+        doc.m.save()
+        self.assertEqual(doc.profile.first_name, None)
+        self.assertEqual(doc.profile.first_name_encrypted, None)
+
+
 class TestDocumentEncryptionMimAutoSettings(TestDocumentEncryption):
     def setUp(self):
         # replace super() NOT using it
