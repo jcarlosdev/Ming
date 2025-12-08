@@ -296,12 +296,12 @@ class TestDocumentEncryption(TestCase):
                 age=int  # non-encrypted field
             ))
 
-        # Create document with encrypted fields in nested dict
-        doc = TestDocNested.make(dict(
+        # Create document using make_encr with unencrypted field names
+        doc = TestDocNested.make_encr(dict(
             _id=1,
             profile=dict(
-                first_name_encrypted=TestDocNested.encr('Jerome'),
-                last_name_encrypted=TestDocNested.encr('Smith'),
+                first_name='Jerome',
+                last_name='Smith',
                 age=30
             )
         ))
@@ -315,6 +315,12 @@ class TestDocumentEncryption(TestCase):
         # Test that encrypted values are stored correctly
         self.assertIsInstance(doc.profile.first_name_encrypted, bytes)
         self.assertEqual(doc.profile.first_name_encrypted, TestDocNested.encr('Jerome'))
+        
+        # Verify that only encrypted fields are in the underlying dict (not the virtual decrypted fields)
+        self.assertIn('first_name_encrypted', doc.profile)
+        self.assertIn('last_name_encrypted', doc.profile)
+        self.assertNotIn('first_name', dict.keys(doc.profile))
+        self.assertNotIn('last_name', dict.keys(doc.profile))
         
         # Test setting decrypted values
         doc.profile.first_name = 'Jane'

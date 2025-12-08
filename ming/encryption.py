@@ -304,11 +304,47 @@ class EncryptedMixin:
         :param data: a dictionary of data to be encrypted
         :return: a modified copy of the ``data`` param with the currently-unencrypted-but-encryptable fields replaced with ``_encrypted`` counterparts.
         """
+        from ming.declarative import Document
+        from ming.odm.declarative import MappedClass
+        
         encrypted_data = data.copy()
+        
+        # Handle top-level decrypted fields
         for fld in cls.decrypted_field_names():
             if fld in encrypted_data:
                 val = encrypted_data.pop(fld)
                 encrypted_data[f'{fld}_encrypted'] = cls.encr(val)
+        
+        # Handle nested EncryptedObject fields
+        if issubclass(cls, Document):
+            schema = cls.m.schema
+        elif issubclass(cls, MappedClass):
+            schema = cls.query.mapper.collection.m.schema
+        else:
+            return encrypted_data
+        
+        # Check each field in the schema for EncryptedObjectSchema
+        if hasattr(schema, 'fields'):
+            for field_name, field_schema in schema.fields.items():
+                if field_name in encrypted_data and isinstance(encrypted_data[field_name], dict):
+                    # Check if this field has an EncryptedObjectSchema
+                    from ming.schema import EncryptedObjectSchema
+                    if isinstance(field_schema, EncryptedObjectSchema):
+                        # Recursively encrypt nested fields
+                        nested_data = encrypted_data[field_name]
+                        encrypted_nested = {}
+                        
+                        # Copy over all existing fields
+                        encrypted_nested.update(nested_data)
+                        
+                        # Encrypt decrypted fields in the nested dict
+                        for decrypted_name, decrypted_field in field_schema._decrypted_fields.items():
+                            if decrypted_name in encrypted_nested:
+                                val = encrypted_nested.pop(decrypted_name)
+                                encrypted_nested[decrypted_field.encrypted_field] = cls.encr(val)
+                        
+                        encrypted_data[field_name] = encrypted_nested
+        
         return encrypted_data
 
     def decrypt_some_fields(self) -> dict:
