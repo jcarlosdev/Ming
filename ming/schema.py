@@ -6,12 +6,12 @@ from datetime import datetime, date
 from decimal import Decimal, ROUND_HALF_DOWN, Context
 
 import bson
-import pymongo
 import pytz
 from bson import Decimal128
 
 from .utils import LazyProperty
 from .base import Object as BaseObject, Missing, NoDefault
+from .encryption import EncryptedObject, EncryptedMixin, DecryptedField
 
 log = logging.getLogger(__name__)
 
@@ -118,7 +118,10 @@ class SchemaItem:
             else:
                 raise ValueError('Array must have 0-1 elements')
         elif isinstance(field, dict):
-            field = Object(field, *args, **kwargs)
+            if cls._has_decrypted_fields(field):
+                field = EncryptedObjectSchema(field, *args, **kwargs)
+            else:
+                field = Object(field, *args, **kwargs)
         elif field is None:
             field = Anything(*args, **kwargs)
         elif field in SHORTHAND:
@@ -128,6 +131,16 @@ class SchemaItem:
         if not isinstance(field, SchemaItem):
             field = Value(field, *args, **kwargs)
         return field
+
+    @classmethod
+    def _has_decrypted_fields(cls, field: dict) -> bool:
+        """ Recursively checks if a dict field has nested DecryptedField attributes. """
+        for k, v in field.items():
+            if isinstance(v, DecryptedField):
+                return True
+            if isinstance(v, dict) and cls._has_decrypted_fields(v):
+                return True
+        return False
 
 
 class Migrate(SchemaItem):
@@ -400,6 +413,57 @@ class Object(FancySchemaItem):
         self.fields.update(other.fields)
 
 
+class EncryptedObjectSchema(Object):
+    """Schema for dict-like objects that contain :class:`ming.encryption.DecryptedField` instances.
+
+    This schema extends :class:`Object` and provides support for nested encrypted fields.
+    When a dict schema contains DecryptedField instances, this schema is automatically used
+    instead of the regular Object schema.
+
+    Example::
+
+        profile = Field(dict(
+            first_name=DecryptedField(str, 'first_name_encrypted'),
+            first_name_encrypted=ming.schema.Binary
+        ))
+
+    The DecryptedField values in the dict are stored but not validated as schema items.
+    Instead, they are used to configure the resulting EncryptedObject to handle
+    encryption/decryption on access.
+    """
+
+    def __init__(self, fields=None, required=False, if_missing=NoDefault):
+        if fields is None:
+            fields = {}
+
+        super().__init__(fields, required, if_missing)
+
+    def _validate(self, d, allow_extra=False, strip_extra=False):
+        # First, validate using parent class
+        result = super()._validate(d, allow_extra=allow_extra, strip_extra=strip_extra)
+
+        # Convert to EncryptedObject if we have decrypted fields
+        # Get encryption functions from the context (passed through validation chain)
+        # These will be set by the parent Document's validation
+        # encrypted_result = EncryptedObject(
+        #     result,
+        #     decrypted_fields=self._decrypted_fields,
+        #     encr_func=None,  # Will be set by parent
+        #     decr_func=None  # Will be set by parent
+        # )
+        # return encrypted_result
+        # return result
+        return self._convert_nested_fields(result)
+
+    def _convert_nested_fields(self, doc: dict):
+        decrypted_fields = [fld.replace('_encrypted', '') for fld in doc.keys() if 'encrypted' in fld]
+        encr_obj = EncryptedObject(doc, decrypted_fields=decrypted_fields, encr_func=None, decr_func=None)
+        for name, value in doc.items():
+            if isinstance(value, dict):
+                doc[name] = self._convert_nested_fields(value)
+        return encr_obj
+
+
 class Document(Object):
     """Specializes :class:`Object` adding polymorphic validation.
 
@@ -456,9 +520,28 @@ class Document(Object):
             result = cls.__new__(cls)
             result.update(super()._validate(
                     d, allow_extra=allow_extra, strip_extra=strip_extra))
+            if issubclass(cls, EncryptedMixin):
+                self._inject_encryption_funcs(result, cls)
             return result
         return cls.m.make(
             d, allow_extra=allow_extra, strip_extra=strip_extra)
+
+    def _inject_encryption_funcs(self, obj, cls):
+        """Recursively inject encryption functions into nested EncryptedObject instances."""
+        for key, value in obj.items():
+            if isinstance(value, EncryptedObject):
+                # Inject encryption functions from the document class
+                object.__setattr__(value, '_encr_func', cls.encr)
+                object.__setattr__(value, '_decr_func', cls.decr)
+                self._inject_encryption_funcs(value, cls)
+            elif isinstance(value, dict):
+                # Recursively process nested dicts
+                self._inject_encryption_funcs(value, cls)
+            elif isinstance(value, list):
+                # Process lists of dicts
+                for item in value:
+                    if isinstance(item, (dict, EncryptedObject)):
+                        self._inject_encryption_funcs(item, cls)
 
     def set_polymorphic(self, field, registry, identity):
         """Configure polymorphic behaviour (except for ``.managed_class``).

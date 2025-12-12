@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, TypeVar, Generic
 
+from ming.base import Object as BaseObject
 from ming.utils import classproperty
 import ming.schema
 
@@ -13,6 +14,59 @@ if TYPE_CHECKING:
 
 class MingEncryptionError(Exception):
     pass
+
+
+class EncryptedObject(BaseObject):
+    """A dict-like object that supports DecryptedField behavior for nested encrypted fields.
+
+    This class extends :class:`ming.base.Object` and provides automatic decryption/encryption
+    when accessing fields that have a corresponding encrypted counterpart.
+    """
+
+    __slots__ = ('_decrypted_fields', '_encr_func', '_decr_func')
+
+    def __init__(self, data=None, decrypted_fields=None, encr_func=None, decr_func=None):
+        """
+        :param data: Initial data for the object
+        :param decrypted_fields: Dict mapping decrypted field names to their DecryptedField instances
+        :param encr_func: Function to encrypt values (datastore.encr)
+        :param decr_func: Function to decrypt values (datastore.decr)
+        """
+        super().__init__(data or {})
+        object.__setattr__(self, '_decrypted_fields', decrypted_fields or {})
+        object.__setattr__(self, '_encr_func', encr_func)
+        object.__setattr__(self, '_decr_func', decr_func)
+
+    def __getitem__(self, name):
+        # Check if this is a decrypted field accessed via dict notation
+        decrypted_fields = object.__getattribute__(self, '_decrypted_fields')
+        if name in decrypted_fields:
+            decr_func = object.__getattribute__(self, '_decr_func')
+            encrypted_value = dict.__getitem__(self, f'{name}_encrypted')
+            if decr_func is not None and encrypted_value is not None:
+                return decr_func(encrypted_value)
+            return encrypted_value
+        return dict.__getitem__(self, name)
+
+    def __setitem__(self, name, value):
+        # Check if this is a decrypted field accessed via dict notation
+        decrypted_fields = object.__getattribute__(self, '_decrypted_fields')
+        if name in decrypted_fields:
+            encr_func = object.__getattribute__(self, '_encr_func')
+            decrypted_field = decrypted_fields[name]
+
+            # Type check
+            if value is not None and not isinstance(value, decrypted_field.field_type):
+                raise TypeError(f'not {decrypted_field.field_type}, got {value!r}')
+
+            # Encrypt and store
+            if encr_func is not None and value is not None:
+                encrypted_value = encr_func(value)
+            else:
+                encrypted_value = value
+            dict.__setitem__(self, decrypted_field.encrypted_field, encrypted_value)
+            return
+        dict.__setitem__(self, name, value)
 
 
 class EncryptionConfig:
@@ -150,6 +204,9 @@ class EncryptedMixin:
                 if v.type in (ming.schema.Deprecated,):
                     continue
                 field_names.append(k)
+                if isinstance(v.type, dict):
+                    for flat_key in cls._flatten_dict_keys(v.type, k):
+                        field_names.append(flat_key)
             return field_names
         if issubclass(cls, MappedClass):
             fields: list[tuple[str, FieldProperty]] = list(cls.query.mapper.property_index.items())
@@ -160,6 +217,20 @@ class EncryptedMixin:
                 field_names.append(k)
             return field_names
         raise NotImplementedError("Unexpected class type. You must implement `field_names` as a @classproperty in your mixin implementation.")
+
+    @classmethod
+    def _flatten_dict_keys(cls, d: dict | ming.schema.Object, current_path: str = '') -> Iterator[str]:
+        if not isinstance(d, dict):
+            raise ValueError(f'Value must be a dict, got {d!r}')
+
+        for k, v in d.items():
+            if current_path:
+                new_path = f'{current_path}.{k}'
+            else:
+                new_path = k
+            yield new_path
+            if isinstance(v, dict):
+                yield from cls._flatten_dict_keys(v, new_path)
 
     @classmethod
     def encr(cls, s: str | None, provider='local') -> bytes | None:
@@ -206,6 +277,10 @@ class EncryptedMixin:
             if fld in encrypted_data:
                 val = encrypted_data.pop(fld)
                 encrypted_data[f'{fld}_encrypted'] = cls.encr(val)
+            else:
+                val = cls._pop_dict_path_value(encrypted_data, fld)
+                if val is not None:
+                    cls._set_dict_path_value(encrypted_data, f'{fld}_encrypted', cls.encr(val))
         return encrypted_data
 
     def decrypt_some_fields(self) -> dict:
@@ -220,3 +295,43 @@ class EncryptedMixin:
             else:
                 decrypted_data[k] = getattr(self, k)
         return decrypted_data
+
+    @classmethod
+    def _pop_dict_path_value(cls, data: dict, path: str):
+        """
+        Given a dictionary and a dot-separated path, returns the value at that path.
+
+        :param data: a dictionary to search
+        :param path: a dot-separated path to the value to return
+        :return: the value at the specified path
+        """
+        keys = path.split('.')
+        val = data
+        try:
+            for key in keys[:-1]:
+                val = val[key]
+
+            v = val.pop(keys[-1])
+            return v
+        except KeyError:
+            return None
+
+    @classmethod
+    def _set_dict_path_value(cls, data: dict, path: str, value):
+        """
+        Given a dictionary and a dot-separated path, sets the value at that path.
+
+        :param data: a dictionary to modify
+        :param path: a dot-separated path to the value to set
+        :param value: the value to set at the specified path
+        """
+        if '.' not in path:
+            data[path] = value
+            return
+        keys = path.split('.')
+        d = data
+        for key in keys[:-1]:
+            if key not in d or not isinstance(d[key], dict):
+                d[key] = {}
+            d = d[key]
+        d[keys[-1]] = value
