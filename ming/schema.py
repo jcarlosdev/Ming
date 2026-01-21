@@ -11,7 +11,7 @@ from bson import Decimal128
 
 from .utils import LazyProperty
 from .base import Object as BaseObject, Missing, NoDefault
-from .encryption import EncryptedObject, EncryptedMixin, DecryptedField
+from .encryption import EncryptedObject, EncryptedArray, EncryptedMixin, DecryptedField
 
 log = logging.getLogger(__name__)
 
@@ -46,22 +46,21 @@ class Invalid(Exception):
         Like `error_list`, but for dictionary compound validators.
     """
 
-    def __init__(self, msg,
-                 value, state=None, error_list=None, error_dict=None):
+    def __init__(self, msg, value, state=None, error_list=None, error_dict=None):
         Exception.__init__(self, msg)
         self.msg = msg
         self.value = value
         self.state = state
         self.error_list = error_list
         self.error_dict = error_dict
-        assert (not self.error_list or not self.error_dict), (
-                "Errors shouldn't have both error dicts and lists "
-                "(error %s has %s and %s)"
-                % (self, self.error_list, self.error_dict))
+        assert not self.error_list or not self.error_dict, (
+            "Errors shouldn't have both error dicts and lists "
+            "(error %s has %s and %s)" % (self, self.error_list, self.error_dict)
+        )
 
     def __str__(self):
         val = self.msg
-        #if self.value:
+        # if self.value:
         #    val += " (value: %s)" % repr(self.value)
         return val
 
@@ -85,7 +84,7 @@ class SchemaItem:
 
         Default implementation just raises :class:`NotImplementedError`
         """
-        raise NotImplementedError('validate')
+        raise NotImplementedError("validate")
 
     @classmethod
     def make(cls, field, *args, **kwargs):
@@ -116,7 +115,7 @@ class SchemaItem:
             elif len(field) == 1:
                 field = Array(field[0], *args, **kwargs)
             else:
-                raise ValueError('Array must have 0-1 elements')
+                raise ValueError("Array must have 0-1 elements")
         elif isinstance(field, dict):
             if cls._has_decrypted_fields(field):
                 field = EncryptedObjectSchema(field, *args, **kwargs)
@@ -128,13 +127,18 @@ class SchemaItem:
             field = SHORTHAND[field]
         if isinstance(field, type):
             field = field(*args, **kwargs)
+        # Handle Field objects by extracting their schema (duck-typing to avoid circular imports)
+        if hasattr(field, "schema") and isinstance(
+            getattr(field, "schema", None), SchemaItem
+        ):
+            field = field.schema
         if not isinstance(field, SchemaItem):
             field = Value(field, *args, **kwargs)
         return field
 
     @classmethod
     def _has_decrypted_fields(cls, field: dict) -> bool:
-        """ Recursively checks if a dict field has nested DecryptedField attributes. """
+        """Recursively checks if a dict field has nested DecryptedField attributes."""
         for k, v in field.items():
             if isinstance(v, DecryptedField):
                 return True
@@ -158,11 +162,13 @@ class Migrate(SchemaItem):
 
 
     """
+
     def __init__(self, old, new, migration_function):
         self.old, self.new, self.migration_function = (
             SchemaItem.make(old),
             SchemaItem.make(new),
-            migration_function)
+            migration_function,
+        )
 
     def validate(self, value, **kw):
         """First tries validation against ``new`` and if it fails applies ``migrate_function``.
@@ -193,15 +199,12 @@ class Migrate(SchemaItem):
         If ``value_name`` is ``None``, then value must be an object which
         will be expanded in the resulting object itself: ``[ { key_name: key, **value } ]``.
         """
+
         def migrate_scalars(value):
-            return [
-                BaseObject({ key_name: k, value_name: v})
-                for k,v in value.items() ]
+            return [BaseObject({key_name: k, value_name: v}) for k, v in value.items()]
 
         def migrate_objects(value):
-            return [
-                BaseObject(dict(v, **{key_name:k}))
-                for k,v in value.items() ]
+            return [BaseObject(dict(v, **{key_name: k})) for k, v in value.items()]
 
         if value_name is None:
             return migrate_objects
@@ -211,6 +214,7 @@ class Migrate(SchemaItem):
 
 class Deprecated(SchemaItem):
     """Used for deprecated fields -- they will be stripped from the object."""
+
     def validate(self, value, **kw):
         if value is not Missing:
             # log.debug('Stripping deprecated field value %r', value)
@@ -223,8 +227,9 @@ class FancySchemaItem(SchemaItem):
 
     If the value is present, then the result of :meth:`._validate` method is returned.
     """
-    required=False
-    if_missing=Missing
+
+    required = False
+    if_missing = Missing
 
     def __init__(self, required=NoDefault, if_missing=NoDefault):
         """
@@ -244,25 +249,24 @@ class FancySchemaItem(SchemaItem):
             self.validate = self._validate_optional
 
     def __repr__(self):
-        return '<{} required={} if_missing=...>'.format(
-            self.__class__.__name__, self.required)
+        return "<{} required={} if_missing=...>".format(
+            self.__class__.__name__, self.required
+        )
 
     @LazyProperty
     def _callable_if_missing(self):
         return isinstance(
-            self.if_missing, (
-                types.FunctionType,
-                types.MethodType,
-                types.BuiltinFunctionType))
+            self.if_missing,
+            (types.FunctionType, types.MethodType, types.BuiltinFunctionType),
+        )
 
     def _validate_required(self, value, **kw):
         if value is Missing:
-            raise Invalid('Missing field', value, None)
+            raise Invalid("Missing field", value, None)
         return self._validate(value, **kw)
 
     def _validate_fast_missing(self, value, **kw):
-        if (value is Missing
-            or value == self.if_missing):
+        if value is Missing or value == self.if_missing:
             return self.if_missing
         return self._validate(value, **kw)
 
@@ -275,7 +279,7 @@ class FancySchemaItem(SchemaItem):
             elif self.if_missing is Missing:
                 return self.if_missing
             else:
-                return deepcopy(self.if_missing) # handle mutable defaults
+                return deepcopy(self.if_missing)  # handle mutable defaults
         if value == self.if_missing:
             return value
         return self._validate(value, **kw)
@@ -317,49 +321,52 @@ class Object(FancySchemaItem):
     """
 
     def __init__(self, fields=None, required=False, if_missing=NoDefault):
-        if fields is None: fields = {}
+        if fields is None:
+            fields = {}
         FancySchemaItem.__init__(self, required, if_missing)
-        self.fields = {name: SchemaItem.make(field)
-                           for name, field in fields.items()}
+        self.fields = {name: SchemaItem.make(field) for name, field in fields.items()}
         if len(self.fields) == 1:
             name, field = list(self.fields.items())[0]
             if not isinstance(name, str):
                 self._validate = lambda d, **kw: (
-                    self._validate_homogenous(name, field, d, **kw))
+                    self._validate_homogenous(name, field, d, **kw)
+                )
 
     @LazyProperty
     def field_items(self):
         return sorted(self.fields.items())
 
     def __repr__(self):
-        l = [ super().__repr__() ]
-        for k,f in self.fields.items():
-            l.append('  {}: {}'.format(k, repr(f).replace('\n', '\n    ')))
-        return '\n'.join(l)
+        l = [super().__repr__()]
+        for k, f in self.fields.items():
+            l.append("  {}: {}".format(k, repr(f).replace("\n", "\n    ")))
+        return "\n".join(l)
 
     def if_missing(self):
         return BaseObject(
             (k, v.validate(Missing))
-            for k,v in self.fields.items()
-            if isinstance(k, str))
+            for k, v in self.fields.items()
+            if isinstance(k, str)
+        )
 
     def _validate_homogenous(self, name, field, d, **kw):
-        if not isinstance(d, dict): raise Invalid(f'notdict: {d}', d, None)
+        if not isinstance(d, dict):
+            raise Invalid(f"notdict: {d}", d, None)
         l_Missing = Missing
         name_validator = SchemaItem.make(name)
         to_set = []
         errors = []
-        for k,v in d.items():
+        for k, v in d.items():
             try:
                 k = name_validator.validate(k, **kw)
                 v = field.validate(v, **kw)
                 if v is not l_Missing:
-                    to_set.append((k,v))
+                    to_set.append((k, v))
             except Invalid as inv:
                 errors.append((name, inv))
         if errors:
             error_dict = dict(errors)
-            msg = '\n'.join('%s:%s' % t for t in error_dict.items())
+            msg = "\n".join("%s:%s" % t for t in error_dict.items())
             raise Invalid(msg, d, None, error_dict=error_dict)
         return BaseObject(to_set)
 
@@ -369,16 +376,16 @@ class Object(FancySchemaItem):
         try:
             validated = [
                 (name, field.validate(d.get(name, l_Missing), **kw))
-                for name, field in self.field_items ]
-            to_set.extend([
-                (name, value)
-                for name, value in validated
-                if value is not l_Missing])
+                for name, field in self.field_items
+            ]
+            to_set.extend(
+                [(name, value) for name, value in validated if value is not l_Missing]
+            )
             return
         except Invalid:
             pass
         # Go back and re-scan for the invalid items
-        for name,field in self.field_items:
+        for name, field in self.field_items:
             try:
                 value = field.validate(d.get(name, l_Missing), **kw)
                 if value is not l_Missing:
@@ -387,16 +394,19 @@ class Object(FancySchemaItem):
                 errors.append((name, inv))
 
     def _validate(self, d, allow_extra=False, strip_extra=False):
-        if not isinstance(d, dict): raise Invalid(f'notdict: {d}', d, None)
+        if not isinstance(d, dict):
+            raise Invalid(f"notdict: {d}", d, None)
         if allow_extra and not strip_extra:
             to_set = list(d.items())
         else:
             to_set = []
         errors = []
-        self._validate_core(d, to_set, errors, allow_extra=allow_extra, strip_extra=strip_extra)
+        self._validate_core(
+            d, to_set, errors, allow_extra=allow_extra, strip_extra=strip_extra
+        )
         if errors:
             error_dict = dict(errors)
-            msg = '\n'.join('%s:%s' % t for t in errors)
+            msg = "\n".join("%s:%s" % t for t in errors)
             raise Invalid(msg, d, None, error_dict=error_dict)
         result = BaseObject(to_set)
         if not allow_extra:
@@ -405,11 +415,12 @@ class Object(FancySchemaItem):
             except AttributeError as ae:
                 raise Invalid(str(ae), d, None)
             if extra_keys:
-                raise Invalid('Extra keys: %r' % extra_keys, d, None)
+                raise Invalid("Extra keys: %r" % extra_keys, d, None)
         return result
 
     def extend(self, other):
-        if other is None: return
+        if other is None:
+            return
         self.fields.update(other.fields)
 
 
@@ -456,12 +467,81 @@ class EncryptedObjectSchema(Object):
         return self._convert_nested_fields(result)
 
     def _convert_nested_fields(self, doc: dict):
-        decrypted_fields = [fld.replace('_encrypted', '') for fld in doc.keys() if 'encrypted' in fld]
-        encr_obj = EncryptedObject(doc, decrypted_fields=decrypted_fields, encr_func=None, decr_func=None)
+        decrypted_fields = [
+            fld.replace("_encrypted", "") for fld in doc.keys() if "encrypted" in fld
+        ]
+        encr_obj = EncryptedObject(
+            doc, decrypted_fields=decrypted_fields, encr_func=None, decr_func=None
+        )
         for name, value in doc.items():
             if isinstance(value, dict):
                 doc[name] = self._convert_nested_fields(value)
+            elif isinstance(value, list) and not isinstance(value, EncryptedArray):
+                doc[name] = self._convert_list_to_encrypted_array(value, name, doc)
         return encr_obj
+
+    def _convert_list_to_encrypted_array(
+        self, lst: list, field_name: str, parent_doc: dict
+    ):
+        """Convert a list to an EncryptedArray if it contains encrypted elements.
+
+        :param lst: The list to potentially convert
+        :param field_name: The name of the field containing this list
+        :param parent_doc: The parent document containing this list
+        :return: EncryptedArray if list has encrypted elements, otherwise the original list
+        """
+        if not lst:
+            return lst
+
+        # Determine element type from the first element
+        first_elem = lst[0]
+
+        if isinstance(first_elem, bytes):
+            # This is likely an array of encrypted strings
+            # Check if there's a corresponding decrypted field name pattern
+            # e.g., if field is 'emails_encrypted', it's encrypted strings
+            if field_name.endswith("_encrypted"):
+                return EncryptedArray(
+                    lst,
+                    element_type="string",
+                    decrypted_fields=[],
+                    encr_func=None,
+                    decr_func=None,
+                )
+            return lst
+        elif isinstance(first_elem, dict):
+            # Array of dicts - check if dicts have encrypted fields
+            decrypted_fields = [
+                fld.replace("_encrypted", "")
+                for fld in first_elem.keys()
+                if "encrypted" in fld
+            ]
+            if decrypted_fields:
+                # Convert each dict element to EncryptedObject
+                converted_list = []
+                for elem in lst:
+                    if isinstance(elem, dict):
+                        converted_list.append(self._convert_nested_fields(elem))
+                    else:
+                        converted_list.append(elem)
+                return EncryptedArray(
+                    converted_list,
+                    element_type="dict",
+                    decrypted_fields=decrypted_fields,
+                    encr_func=None,
+                    decr_func=None,
+                )
+            else:
+                # No encrypted fields in dicts, but still process nested dicts
+                converted_list = []
+                for elem in lst:
+                    if isinstance(elem, dict):
+                        converted_list.append(self._convert_nested_fields(elem))
+                    else:
+                        converted_list.append(elem)
+                return converted_list
+        else:
+            return lst
 
 
 class Document(Object):
@@ -485,11 +565,10 @@ class Document(Object):
     method must be called to configure them properly.
     """
 
-    def __init__(self, fields=None,
-                 required=False, if_missing=NoDefault):
+    def __init__(self, fields=None, required=False, if_missing=NoDefault):
         super().__init__(fields, required, if_missing)
         self.polymorphic_on = self.polymorphic_registry = None
-        self.managed_class=None
+        self.managed_class = None
 
     def get_polymorphic_cls(self, data):
         """Given a mongodb document it returns the class it should be converted to."""
@@ -498,7 +577,7 @@ class Document(Object):
             disc = data.get(self.polymorphic_on, Missing)
             if disc is Missing:
                 mm = self.managed_class.m
-                disc = getattr(mm, 'polymorphic_identity', Missing)
+                disc = getattr(mm, "polymorphic_identity", Missing)
             if disc is not l_Missing:
                 cls = self.polymorphic_registry[disc]
             return cls
@@ -509,31 +588,41 @@ class Document(Object):
             return super().validate(value, **kw)
         except Invalid as inv:
             if self.managed_class:
-                inv.msg = '{}:\n    {}'.format(
-                    self.managed_class,
-                    inv.msg.replace('\n', '\n    '))
+                inv.msg = "{}:\n    {}".format(
+                    self.managed_class, inv.msg.replace("\n", "\n    ")
+                )
             raise
 
     def _validate(self, d, allow_extra=False, strip_extra=False):
         cls = self.get_polymorphic_cls(d)
         if cls is None or cls == self.managed_class:
             result = cls.__new__(cls)
-            result.update(super()._validate(
-                    d, allow_extra=allow_extra, strip_extra=strip_extra))
+            result.update(
+                super()._validate(d, allow_extra=allow_extra, strip_extra=strip_extra)
+            )
             if issubclass(cls, EncryptedMixin):
                 self._inject_encryption_funcs(result, cls)
             return result
-        return cls.m.make(
-            d, allow_extra=allow_extra, strip_extra=strip_extra)
+        return cls.m.make(d, allow_extra=allow_extra, strip_extra=strip_extra)
 
     def _inject_encryption_funcs(self, obj, cls):
-        """Recursively inject encryption functions into nested EncryptedObject instances."""
+        """Recursively inject encryption functions into nested EncryptedObject and EncryptedArray instances."""
         for key, value in obj.items():
             if isinstance(value, EncryptedObject):
                 # Inject encryption functions from the document class
-                object.__setattr__(value, '_encr_func', cls.encr)
-                object.__setattr__(value, '_decr_func', cls.decr)
+                object.__setattr__(value, "_encr_func", cls.encr)
+                object.__setattr__(value, "_decr_func", cls.decr)
                 self._inject_encryption_funcs(value, cls)
+            elif isinstance(value, EncryptedArray):
+                # Inject encryption functions into EncryptedArray
+                object.__setattr__(value, "_encr_func", cls.encr)
+                object.__setattr__(value, "_decr_func", cls.decr)
+                # Also inject into dict elements if element_type is 'dict'
+                element_type = object.__getattribute__(value, "_element_type")
+                if element_type == "dict":
+                    for item in value:
+                        if isinstance(item, (dict, EncryptedObject)):
+                            self._inject_encryption_funcs(item, cls)
             elif isinstance(value, dict):
                 # Recursively process nested dicts
                 self._inject_encryption_funcs(value, cls)
@@ -568,22 +657,24 @@ class Array(FancySchemaItem):
     All elements of the array must pass validation by a
     single ``field_type`` (which itself may be Anything, however).
     """
+
     def __init__(self, field_type, **kw):
-        required = kw.pop('required', False)
-        if_missing = kw.pop('if_missing', [])
-        validate_ranges = kw.pop('validate_ranges', None)
+        required = kw.pop("required", False)
+        if_missing = kw.pop("if_missing", [])
+        validate_ranges = kw.pop("validate_ranges", None)
         FancySchemaItem.__init__(self, required, if_missing)
         self._field_type = field_type
         if validate_ranges:
             self._validate = lambda d, **kw: (
-                self._range_validate(validate_ranges, d, **kw))
+                self._range_validate(validate_ranges, d, **kw)
+            )
         else:
             self._validate = self._full_validate
 
     def __repr__(self):
-        l = [ super().__repr__() ]
-        l.append('  ' + repr(self.field_type).replace('\n', '\n    '))
-        return '\n'.join(l)
+        l = [super().__repr__()]
+        l.append("  " + repr(self.field_type).replace("\n", "\n    "))
+        return "\n".join(l)
 
     @LazyProperty
     def field_type(self):
@@ -596,27 +687,26 @@ class Array(FancySchemaItem):
         return result
 
     def _full_validate(self, d, **kw):
-        if d is None: d = []
+        if d is None:
+            d = []
         if not isinstance(d, (list, tuple)):
-            raise Invalid('Not a list or tuple', d, None)
+            raise Invalid("Not a list or tuple", d, None)
         # try common case (no Invalid)
         validate = self.field_type.validate
         try:
-            return [
-                validate(value, **kw)
-                for value in d ]
+            return [validate(value, **kw) for value in d]
         except Invalid:
             pass
         # Find the invalid values
-        error_list = [ None ] * len(d)
+        error_list = [None] * len(d)
         for i, value in enumerate(d):
             try:
                 validate(value, **kw)
             except Invalid as inv:
                 error_list[i] = inv
-        msg = '\n'.join((f'[{i}]:{v}')
-                        for i,v in enumerate(error_list)
-                        if v is not None)
+        msg = "\n".join(
+            (f"[{i}]:{v}") for i, v in enumerate(error_list) if v is not None
+        )
         raise Invalid(msg, d, None, error_list=error_list)
 
 
@@ -625,11 +715,12 @@ class Scalar(FancySchemaItem):
 
     This is used to validate single values in MongoDB Documents.
     """
-    if_missing=None
+
+    if_missing = None
 
     def _validate(self, value, **kw):
         if isinstance(value, (tuple, list, dict)):
-            raise Invalid('%r is not a scalar' % value, value, None)
+            raise Invalid("%r is not a scalar" % value, value, None)
         return value
 
 
@@ -641,19 +732,19 @@ class ParticularScalar(Scalar):
     """
 
     #: Expected Type of the validated value.
-    type=()
+    type = ()
 
     def __init__(self, **kw):
-        self._allow_none = kw.pop('allow_none', True)
+        self._allow_none = kw.pop("allow_none", True)
         if not self._allow_none:
-            kw.setdefault('if_missing', Missing)
+            kw.setdefault("if_missing", Missing)
         super().__init__(**kw)
 
     def _validate(self, value, **kw):
-        if self._allow_none and value is None: return value
+        if self._allow_none and value is None:
+            return value
         if not isinstance(value, self.type):
-            raise Invalid(f'{value} is not a {self.type!r}',
-                          value, None)
+            raise Invalid(f"{value} is not a {self.type!r}", value, None)
         return value
 
 
@@ -662,20 +753,21 @@ class OneOf(ParticularScalar):
 
     This is often used to validate against Enums.
     """
+
     def __init__(self, *options, **kwargs):
         self.options = options
         ParticularScalar.__init__(self, **kwargs)
 
     def _validate(self, value, **kw):
         if value not in self.options:
-            raise Invalid(f'{value} is not in {self.options!r}',
-                          value, None)
+            raise Invalid(f"{value} is not in {self.options!r}", value, None)
         return value
 
 
 class Value(FancySchemaItem):
     """Checks that validated value is exactly ``value``"""
-    if_missing=None
+
+    if_missing = None
 
     def __init__(self, value, **kw):
         self.value = value
@@ -683,13 +775,13 @@ class Value(FancySchemaItem):
 
     def _validate(self, value, **kw):
         if value != self.value:
-            raise Invalid(f'{value!r} != {self.value!r}',
-                          value, None)
+            raise Invalid(f"{value!r} != {self.value!r}", value, None)
         return value
 
 
 class String(ParticularScalar):
     """Validates value is ``str`` or ``unicode`` string"""
+
     type = (str,)
 
 
@@ -699,6 +791,7 @@ class Int(ParticularScalar):
     Also accepts float which represent integer numbers
     like ``10.0`` -> ``10``.
     """
+
     type = (int,)
 
     def _validate(self, value, **kw):
@@ -709,11 +802,13 @@ class Int(ParticularScalar):
 
 class Float(ParticularScalar):
     """Validates value is ``int`` or ``float``"""
+
     type = (float, int)
 
 
 class DateTimeTZ(ParticularScalar):
     """Validates value is a ``datetime``."""
+
     type = datetime
 
 
@@ -724,14 +819,15 @@ class DateTime(DateTimeTZ):
     to UTC timezone.
     if value is instance of ``date`` it will be converted to ``datetime``
     """
+
     def _validate(self, value, **kw):
         if isinstance(value, date) and not isinstance(value, datetime):
             value = datetime(value.year, value.month, value.day)
         value = DateTimeTZ._validate(self, value, **kw)
-        if value is None: return value
+        if value is None:
+            return value
         if not isinstance(value, self.type):
-            raise Invalid(f'{value} is not a {self.type!r}',
-                          value, None)
+            raise Invalid(f"{value} is not a {self.type!r}", value, None)
         # Truncate microseconds and keep milliseconds only (mimics BSON datetime)
         value = value.replace(microsecond=(value.microsecond // 1000) * 1000)
         # Convert a local timestamp to UTC
@@ -742,12 +838,14 @@ class DateTime(DateTimeTZ):
 
 class Bool(ParticularScalar):
     """Validates value is a ``bool``"""
-    type=bool
+
+    type = bool
 
 
 class Binary(ParticularScalar):
     """Validates value is a :class:`bson.Binary`"""
-    type=(bson.Binary, bytes)
+
+    type = (bson.Binary, bytes)
 
 
 class ObjectId(Scalar):
@@ -765,20 +863,22 @@ class ObjectId(Scalar):
         >>> schema.ObjectId(if_missing=None).validate(schema.Missing)
         None
     """
+
     def if_missing(self):
         """Provides a :class:`bson.ObjectId` as default"""
         return bson.ObjectId()
 
     def _validate(self, value, **kw):
         try:
-            if value is None: return value
+            if value is None:
+                return value
             value = Scalar._validate(self, value, **kw)
             if isinstance(value, bson.ObjectId):
                 return value
             elif isinstance(value, str):
                 return bson.ObjectId(str(value))
             else:
-                raise Invalid('%s is not a bson.ObjectId' % value, value, None)
+                raise Invalid("%s is not a bson.ObjectId" % value, value, None)
         except Invalid:
             raise
         except Exception as ex:
@@ -800,20 +900,18 @@ class NumberDecimal(ParticularScalar):
     Defaults to `decimal.ROUND_HALF_DOWN`.
 
     """
+
     type = (int, float, Decimal, Decimal128)
 
-    def __init__(
-        self,
-        precision=None,
-        rounding=ROUND_HALF_DOWN,
-        **kwargs
-    ):
+    def __init__(self, precision=None, rounding=ROUND_HALF_DOWN, **kwargs):
         super().__init__(**kwargs)
         self.precision = precision
         self.rounding = rounding
         self._context = Context(prec=34, rounding=rounding)  # Max Decimal128 precision
         if self.precision:
-            self._quantizing = self._context.create_decimal(Decimal(str(10 ** -precision)))
+            self._quantizing = self._context.create_decimal(
+                Decimal(str(10**-precision))
+            )
 
     def _validate(self, value, **kw):
         value = super()._validate(value, **kw)
