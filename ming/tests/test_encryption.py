@@ -281,6 +281,142 @@ class TestDocumentEncryption(TestCase):
         self.assertEqual(doc.name, None)
         self.assertEqual(doc.name_encrypted, None)
 
+    def test_nested_dict_encryption(self):
+        """Test encryption of fields nested in dict fields."""
+        from bson import ObjectId
+        
+        class UserDoc(Document):
+            class __mongometa__:
+                name = 'user_doc'
+                session = ming.Session.by_name('test_db')
+            
+            _id = Field(S.ObjectId)
+            username = Field(str)
+            # Dict field with encrypted nested fields
+            full_name = Field(dict(
+                first_name_encrypted=S.Binary,
+                last_name_encrypted=S.Binary
+            ))
+        
+        # Create document with unencrypted nested data
+        doc = UserDoc.make_encr({
+            '_id': ObjectId(),
+            'username': 'jdoe',
+            'full_name': {
+                'first_name': 'John',
+                'last_name': 'Doe'
+            }
+        })
+        doc.m.save()
+        
+        # Verify encrypted fields exist in storage
+        self.assertIn('first_name_encrypted', doc.full_name)
+        self.assertIn('last_name_encrypted', doc.full_name)
+        self.assertIsInstance(doc.full_name['first_name_encrypted'], bytes)
+        self.assertIsInstance(doc.full_name['last_name_encrypted'], bytes)
+        
+        # Verify decryption works through dict access
+        self.assertEqual(doc.full_name['first_name'], 'John')
+        self.assertEqual(doc.full_name['last_name'], 'Doe')
+        
+        # Verify we can set nested encrypted fields
+        doc.full_name['first_name'] = 'Johnny'
+        self.assertEqual(doc.full_name['first_name'], 'Johnny')
+        self.assertNotEqual(doc.full_name['first_name_encrypted'], UserDoc.encr('John'))
+        self.assertEqual(doc.full_name['first_name_encrypted'], UserDoc.encr('Johnny'))
+        
+        # Verify the document can be saved and retrieved
+        doc.m.save()
+        retrieved = UserDoc.m.get(_id=doc._id)
+        self.assertEqual(retrieved.full_name['first_name'], 'Johnny')
+        self.assertEqual(retrieved.full_name['last_name'], 'Doe')
+    
+    def test_nested_dict_encryption_multiple_levels(self):
+        """Test encryption of fields nested multiple levels deep."""
+        from bson import ObjectId
+        
+        class ProfileDoc(Document):
+            class __mongometa__:
+                name = 'profile_doc'
+                session = ming.Session.by_name('test_db')
+            
+            _id = Field(S.ObjectId)
+            # Nested dict with encrypted fields
+            personal_info = Field(dict(
+                address=dict(
+                    street_encrypted=S.Binary,
+                    city_encrypted=S.Binary
+                )
+            ))
+        
+        # Create document with multi-level nested unencrypted data
+        doc = ProfileDoc.make_encr({
+            '_id': ObjectId(),
+            'personal_info': {
+                'address': {
+                    'street': '123 Main St',
+                    'city': 'Springfield'
+                }
+            }
+        })
+        doc.m.save()
+        
+        # Verify nested encrypted fields exist
+        self.assertIn('street_encrypted', doc.personal_info['address'])
+        self.assertIn('city_encrypted', doc.personal_info['address'])
+        
+        # Verify decryption works at multiple levels
+        self.assertEqual(doc.personal_info['address']['street'], '123 Main St')
+        self.assertEqual(doc.personal_info['address']['city'], 'Springfield')
+        
+        # Verify setting nested values works
+        doc.personal_info['address']['city'] = 'Shelbyville'
+        self.assertEqual(doc.personal_info['address']['city'], 'Shelbyville')
+        
+        doc.m.save()
+        retrieved = ProfileDoc.m.get(_id=doc._id)
+        self.assertEqual(retrieved.personal_info['address']['city'], 'Shelbyville')
+    
+    def test_nested_dict_mixed_encrypted_and_plain_fields(self):
+        """Test dict with both encrypted and plain fields."""
+        from bson import ObjectId
+        
+        class ContactDoc(Document):
+            class __mongometa__:
+                name = 'contact_doc'
+                session = ming.Session.by_name('test_db')
+            
+            _id = Field(S.ObjectId)
+            contact = Field(dict(
+                email_encrypted=S.Binary,
+                phone_encrypted=S.Binary,
+                public_name=str  # This field is not encrypted
+            ))
+        
+        doc = ContactDoc.make_encr({
+            '_id': ObjectId(),
+            'contact': {
+                'email': 'john@example.com',
+                'phone': '555-1234',
+                'public_name': 'John D.'
+            }
+        })
+        doc.m.save()
+        
+        # Verify encrypted fields work
+        self.assertEqual(doc.contact['email'], 'john@example.com')
+        self.assertEqual(doc.contact['phone'], '555-1234')
+        
+        # Verify plain field works normally
+        self.assertEqual(doc.contact['public_name'], 'John D.')
+        
+        # Verify setting works for both types
+        doc.contact['email'] = 'john.doe@example.com'
+        doc.contact['public_name'] = 'Johnny D.'
+        
+        self.assertEqual(doc.contact['email'], 'john.doe@example.com')
+        self.assertEqual(doc.contact['public_name'], 'Johnny D.')
+
 class TestDocumentEncryptionMimAutoSettings(TestDocumentEncryption):
     def setUp(self):
         # replace super() NOT using it

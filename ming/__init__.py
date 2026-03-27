@@ -7,6 +7,7 @@ from ming.base import Cursor
 from ming.version import __version__, __version_info__
 from ming.config import configure
 from ming.datastore import create_engine, create_datastore
+from ming.encryption import EncryptedObject
 
 # Re-export direction keys
 ASCENDING = pymongo.ASCENDING
