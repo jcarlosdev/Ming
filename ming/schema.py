@@ -118,7 +118,15 @@ class SchemaItem:
             else:
                 raise ValueError('Array must have 0-1 elements')
         elif isinstance(field, dict):
-            field = Object(field, *args, **kwargs)
+            # Check if the dict contains any DecryptedField instances
+            from ming.encryption import DecryptedField
+            has_decrypted_fields = any(
+                isinstance(v, DecryptedField) for v in field.values()
+            )
+            if has_decrypted_fields:
+                field = EncryptedObjectSchema(field, *args, **kwargs)
+            else:
+                field = Object(field, *args, **kwargs)
         elif field is None:
             field = Anything(*args, **kwargs)
         elif field in SHORTHAND:
@@ -400,6 +408,62 @@ class Object(FancySchemaItem):
         self.fields.update(other.fields)
 
 
+class EncryptedObjectSchema(Object):
+    """Schema for dict-like objects that contain :class:`ming.encryption.DecryptedField` instances.
+    
+    This schema extends :class:`Object` and provides support for nested encrypted fields.
+    When a dict schema contains DecryptedField instances, this schema is automatically used
+    instead of the regular Object schema.
+    
+    Example::
+    
+        profile = Field(dict(
+            first_name=DecryptedField(str, 'first_name_encrypted'),
+            first_name_encrypted=ming.schema.Binary
+        ))
+    
+    The DecryptedField values in the dict are stored but not validated as schema items.
+    Instead, they are used to configure the resulting EncryptedObject to handle
+    encryption/decryption on access.
+    """
+    
+    def __init__(self, fields=None, required=False, if_missing=NoDefault):
+        if fields is None:
+            fields = {}
+        
+        # Separate DecryptedField instances from regular schema fields
+        from ming.encryption import DecryptedField
+        self._decrypted_fields = {}
+        regular_fields = {}
+        
+        for name, field in fields.items():
+            if isinstance(field, DecryptedField):
+                self._decrypted_fields[name] = field
+            else:
+                regular_fields[name] = field
+        
+        # Initialize parent with only regular fields
+        super().__init__(regular_fields, required, if_missing)
+    
+    def _validate(self, d, allow_extra=False, strip_extra=False):
+        # First, validate using parent class
+        result = super()._validate(d, allow_extra=allow_extra, strip_extra=strip_extra)
+        
+        # Convert to EncryptedObject if we have decrypted fields
+        if self._decrypted_fields:
+            from ming.encryption import EncryptedObject
+            # Get encryption functions from the context (passed through validation chain)
+            # These will be set by the parent Document's validation
+            encrypted_result = EncryptedObject(
+                result,
+                decrypted_fields=self._decrypted_fields,
+                encr_func=None,  # Will be set by parent
+                decr_func=None   # Will be set by parent
+            )
+            return encrypted_result
+        return result
+
+
 class Document(Object):
     """Specializes :class:`Object` adding polymorphic validation.
 
@@ -454,11 +518,35 @@ class Document(Object):
         cls = self.get_polymorphic_cls(d)
         if cls is None or cls == self.managed_class:
             result = cls.__new__(cls)
-            result.update(super()._validate(
-                    d, allow_extra=allow_extra, strip_extra=strip_extra))
+            validated_data = super()._validate(
+                    d, allow_extra=allow_extra, strip_extra=strip_extra)
+            result.update(validated_data)
+            # Inject encryption functions into nested EncryptedObject instances
+            self._inject_encryption_funcs(result, cls)
             return result
         return cls.m.make(
             d, allow_extra=allow_extra, strip_extra=strip_extra)
+
+    def _inject_encryption_funcs(self, obj, cls):
+        """Recursively inject encryption functions into nested EncryptedObject instances."""
+        from ming.encryption import EncryptedObject, EncryptedMixin
+        
+        if not issubclass(cls, EncryptedMixin):
+            return
+            
+        for key, value in obj.items():
+            if isinstance(value, EncryptedObject):
+                # Inject encryption functions from the document class
+                object.__setattr__(value, '_encr_func', cls.encr)
+                object.__setattr__(value, '_decr_func', cls.decr)
+            elif isinstance(value, dict):
+                # Recursively process nested dicts
+                self._inject_encryption_funcs(value, cls)
+            elif isinstance(value, list):
+                # Process lists of dicts
+                for item in value:
+                    if isinstance(item, (dict, EncryptedObject)):
+                        self._inject_encryption_funcs(item, cls)
 
     def set_polymorphic(self, field, registry, identity):
         """Configure polymorphic behaviour (except for ``.managed_class``).

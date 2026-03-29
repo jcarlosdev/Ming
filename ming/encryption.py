@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, TypeVar, Generic
 
 from ming.utils import classproperty
+from ming.base import Object as BaseObject
 import ming.schema
 
 if TYPE_CHECKING:
@@ -13,6 +14,106 @@ if TYPE_CHECKING:
 
 class MingEncryptionError(Exception):
     pass
+
+
+class EncryptedObject(BaseObject):
+    """A dict-like object that supports DecryptedField behavior for nested encrypted fields.
+    
+    This class extends :class:`ming.base.Object` and provides automatic decryption/encryption
+    when accessing fields that have a corresponding encrypted counterpart.
+    """
+    
+    __slots__ = ('_decrypted_fields', '_encr_func', '_decr_func')
+    
+    def __init__(self, data=None, decrypted_fields=None, encr_func=None, decr_func=None):
+        """
+        :param data: Initial data for the object
+        :param decrypted_fields: Dict mapping decrypted field names to their DecryptedField instances
+        :param encr_func: Function to encrypt values (datastore.encr)
+        :param decr_func: Function to decrypt values (datastore.decr)
+        """
+        super().__init__(data or {})
+        object.__setattr__(self, '_decrypted_fields', decrypted_fields or {})
+        object.__setattr__(self, '_encr_func', encr_func)
+        object.__setattr__(self, '_decr_func', decr_func)
+    
+    def __getattr__(self, name):
+        # Check if this is a decrypted field
+        decrypted_fields = object.__getattribute__(self, '_decrypted_fields')
+        if name in decrypted_fields:
+            decr_func = object.__getattribute__(self, '_decr_func')
+            decrypted_field = decrypted_fields[name]
+            encrypted_value = self.get(decrypted_field.encrypted_field)
+            if decr_func is not None and encrypted_value is not None:
+                return decr_func(encrypted_value)
+            return encrypted_value
+        
+        # Fall back to standard Object behavior
+        try:
+            return self[name]
+        except KeyError:
+            raise AttributeError(name)
+    
+    def __setattr__(self, name, value):
+        # Check if this is a decrypted field
+        decrypted_fields = object.__getattribute__(self, '_decrypted_fields')
+        if name in decrypted_fields:
+            encr_func = object.__getattribute__(self, '_encr_func')
+            decrypted_field = decrypted_fields[name]
+            
+            # Type check
+            if value is not None and not isinstance(value, decrypted_field.field_type):
+                raise TypeError(f'not {decrypted_field.field_type}, got {value!r}')
+            
+            # Encrypt and store
+            if encr_func is not None and value is not None:
+                encrypted_value = encr_func(value)
+            else:
+                encrypted_value = value
+            self[decrypted_field.encrypted_field] = encrypted_value
+            return
+        
+        # Fall back to standard Object behavior
+        if name in self.__class__.__dict__:
+            super().__setattr__(name, value)
+        else:
+            self[name] = value
+    
+    def __getitem__(self, name):
+        # Check if this is a decrypted field accessed via dict notation
+        decrypted_fields = object.__getattribute__(self, '_decrypted_fields')
+        if name in decrypted_fields:
+            decr_func = object.__getattribute__(self, '_decr_func')
+            decrypted_field = decrypted_fields[name]
+            encrypted_field_name = decrypted_field.encrypted_field
+            if encrypted_field_name in self:
+                encrypted_value = dict.__getitem__(self, encrypted_field_name)
+            else:
+                encrypted_value = None
+            if decr_func is not None and encrypted_value is not None:
+                return decr_func(encrypted_value)
+            return encrypted_value
+        return dict.__getitem__(self, name)
+    
+    def __setitem__(self, name, value):
+        # Check if this is a decrypted field accessed via dict notation
+        decrypted_fields = object.__getattribute__(self, '_decrypted_fields')
+        if name in decrypted_fields:
+            encr_func = object.__getattribute__(self, '_encr_func')
+            decrypted_field = decrypted_fields[name]
+            
+            # Type check
+            if value is not None and not isinstance(value, decrypted_field.field_type):
+                raise TypeError(f'not {decrypted_field.field_type}, got {value!r}')
+            
+            # Encrypt and store
+            if encr_func is not None and value is not None:
+                encrypted_value = encr_func(value)
+            else:
+                encrypted_value = value
+            dict.__setitem__(self, decrypted_field.encrypted_field, encrypted_value)
+            return
+        dict.__setitem__(self, name, value)
 
 
 class EncryptionConfig:
@@ -203,11 +304,47 @@ class EncryptedMixin:
         :param data: a dictionary of data to be encrypted
         :return: a modified copy of the ``data`` param with the currently-unencrypted-but-encryptable fields replaced with ``_encrypted`` counterparts.
         """
+        from ming.declarative import Document
+        from ming.odm.declarative import MappedClass
+        
         encrypted_data = data.copy()
+        
+        # Handle top-level decrypted fields
         for fld in cls.decrypted_field_names():
             if fld in encrypted_data:
                 val = encrypted_data.pop(fld)
                 encrypted_data[f'{fld}_encrypted'] = cls.encr(val)
+        
+        # Handle nested EncryptedObject fields
+        if issubclass(cls, Document):
+            schema = cls.m.schema
+        elif issubclass(cls, MappedClass):
+            schema = cls.query.mapper.collection.m.schema
+        else:
+            return encrypted_data
+        
+        # Check each field in the schema for EncryptedObjectSchema
+        if hasattr(schema, 'fields'):
+            for field_name, field_schema in schema.fields.items():
+                if field_name in encrypted_data and isinstance(encrypted_data[field_name], dict):
+                    # Check if this field has an EncryptedObjectSchema
+                    from ming.schema import EncryptedObjectSchema
+                    if isinstance(field_schema, EncryptedObjectSchema):
+                        # Recursively encrypt nested fields
+                        nested_data = encrypted_data[field_name]
+                        encrypted_nested = {}
+                        
+                        # Copy over all existing fields
+                        encrypted_nested.update(nested_data)
+                        
+                        # Encrypt decrypted fields in the nested dict
+                        for decrypted_name, decrypted_field in field_schema._decrypted_fields.items():
+                            if decrypted_name in encrypted_nested:
+                                val = encrypted_nested.pop(decrypted_name)
+                                encrypted_nested[decrypted_field.encrypted_field] = cls.encr(val)
+                        
+                        encrypted_data[field_name] = encrypted_nested
+        
         return encrypted_data
 
     def decrypt_some_fields(self) -> dict:
